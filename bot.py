@@ -1,0 +1,164 @@
+"""
+Telegram-бот для поиска изображений по текстовому запросу.
+
+Как это работает:
+1. Пользователь пишет боту любой текст (например "кот" или "закат на море")
+2. Бот ищет картинки по этому запросу через Unsplash API (с автопереводом на английский)
+3. Бот присылает несколько найденных изображений в чат
+
+Токен и ключ теперь берутся из переменных окружения (env variables) —
+это нужно для безопасного деплоя на Render, чтобы секреты не лежали в коде.
+
+Локальный запуск (на своём компьютере):
+    Windows (PowerShell):
+        $env:TELEGRAM_TOKEN="твой_токен"
+        $env:UNSPLASH_ACCESS_KEY="твой_ключ"
+        python bot.py
+
+На Render эти переменные задаются в панели Environment — их прописывать
+в терминале не нужно, Render передаст их автоматически.
+"""
+
+import asyncio
+import logging
+import os
+
+import aiohttp
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InputMediaPhoto
+from aiohttp import web
+from deep_translator import GoogleTranslator, MyMemoryTranslator
+
+# ==== НАСТРОЙКИ ====
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
+RESULTS_PER_QUERY = 3  # сколько картинок присылать за раз
+PORT = int(os.environ.get("PORT", 8080))  # Render сам подставляет нужный порт
+# ====================
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
+
+
+_translation_cache: dict[str, str] = {}
+
+
+def translate_to_english(query: str) -> str:
+    """Переводит запрос на английский — Unsplash лучше находит картинки
+    по английским словам, т.к. большинство фото размечено на английском.
+    Сначала пробует Google, если он перегружен — пробует MyMemory.
+    Результаты кэшируются, чтобы не переводить один и тот же запрос дважды."""
+    cache_key = query.lower().strip()
+    if cache_key in _translation_cache:
+        return _translation_cache[cache_key]
+
+    translated = None
+
+    try:
+        translated = GoogleTranslator(source="auto", target="en").translate(query)
+    except Exception as e:
+        logging.warning("Google Translate failed, trying MyMemory: %s", e)
+
+    if not translated:
+        try:
+            translated = MyMemoryTranslator(source="ru-RU", target="en-GB").translate(query)
+        except Exception as e:
+            logging.warning("MyMemory Translate failed too, using original query: %s", e)
+
+    result = translated or query
+    _translation_cache[cache_key] = result
+    return result
+
+
+async def search_images(query: str, count: int = 5) -> list[str]:
+    """Ищет изображения на Unsplash по текстовому запросу.
+    Возвращает список прямых ссылок на картинки."""
+    search_query = translate_to_english(query)
+
+    url = "https://api.unsplash.com/search/photos"
+    params = {
+        "query": search_query,
+        "per_page": count,
+        "client_id": UNSPLASH_ACCESS_KEY,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            if response.status != 200:
+                logging.error("Unsplash API error: %s", await response.text())
+                return []
+            data = await response.json()
+
+    results = data.get("results", [])
+    return [item["urls"]["regular"] for item in results]
+
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "Привет! 👋\n\n"
+        "Напиши мне любое слово или фразу — я найду подходящие изображения.\n\n"
+        "Например: закат на море, космос, милые щенки"
+    )
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await message.answer(
+        "Просто напиши текстовый запрос — и я пришлю несколько картинок по теме."
+    )
+
+
+@dp.message()
+async def handle_text(message: types.Message):
+    query = (message.text or "").strip()
+    if not query:
+        await message.answer("Пришли текстовый запрос, чтобы я мог найти картинки.")
+        return
+
+    searching_msg = await message.answer(f"🔍 Ищу картинки по запросу «{query}»...")
+
+    image_urls = await search_images(query, RESULTS_PER_QUERY)
+
+    await searching_msg.delete()
+
+    if not image_urls:
+        await message.answer(
+            "Ничего не нашлось 😕 Попробуй другой запрос или другое слово."
+        )
+        return
+
+    if len(image_urls) == 1:
+        await message.answer_photo(photo=image_urls[0])
+        return
+
+    media = [InputMediaPhoto(media=url) for url in image_urls]
+    await bot.send_media_group(chat_id=message.chat.id, media=media)
+
+
+# ==== Заглушечный веб-сервер, только чтобы Render видел "живой" порт ====
+async def health_check(request):
+    return web.Response(text="Bot is running")
+
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info("Health-check веб-сервер запущен на порту %s", PORT)
+
+
+async def main():
+    print("Бот запущен. Нажми Ctrl+C для остановки.")
+    await run_web_server()
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
