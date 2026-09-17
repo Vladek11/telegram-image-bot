@@ -1,22 +1,5 @@
 """
 Telegram-бот для поиска изображений по текстовому запросу.
-
-Как это работает:
-1. Пользователь пишет боту любой текст (например "кот" или "закат на море")
-2. Бот ищет картинки по этому запросу через Unsplash API (с автопереводом на английский)
-3. Бот присылает несколько найденных изображений в чат
-
-Токен и ключ теперь берутся из переменных окружения (env variables) —
-это нужно для безопасного деплоя на Render, чтобы секреты не лежали в коде.
-
-Локальный запуск (на своём компьютере):
-    Windows (PowerShell):
-        $env:TELEGRAM_TOKEN="твой_токен"
-        $env:UNSPLASH_ACCESS_KEY="твой_ключ"
-        python bot.py
-
-На Render эти переменные задаются в панели Environment — их прописывать
-в терминале не нужно, Render передаст их автоматически.
 """
 
 import asyncio
@@ -33,8 +16,8 @@ from deep_translator import GoogleTranslator, MyMemoryTranslator
 # ==== НАСТРОЙКИ ====
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
-RESULTS_PER_QUERY = 3  # сколько картинок присылать за раз
-PORT = int(os.environ.get("PORT", 8080))  # Render сам подставляет нужный порт
+RESULTS_PER_QUERY = 3
+PORT = int(os.environ.get("PORT", 8080))
 # ====================
 
 logging.basicConfig(level=logging.INFO)
@@ -42,15 +25,10 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-
 _translation_cache: dict[str, str] = {}
 
 
 def translate_to_english(query: str) -> str:
-    """Переводит запрос на английский — Unsplash лучше находит картинки
-    по английским словам, т.к. большинство фото размечено на английском.
-    Сначала пробует Google, если он перегружен — пробует MyMemory.
-    Результаты кэшируются, чтобы не переводить один и тот же запрос дважды."""
     cache_key = query.lower().strip()
     if cache_key in _translation_cache:
         return _translation_cache[cache_key]
@@ -70,12 +48,11 @@ def translate_to_english(query: str) -> str:
 
     result = translated or query
     _translation_cache[cache_key] = result
+    logging.info("Translated '%s' -> '%s'", query, result)
     return result
 
 
 async def search_images(query: str, count: int = 5) -> list[str]:
-    """Ищет изображения на Unsplash по текстовому запросу.
-    Возвращает список прямых ссылок на картинки."""
     search_query = translate_to_english(query)
 
     url = "https://api.unsplash.com/search/photos"
@@ -83,6 +60,7 @@ async def search_images(query: str, count: int = 5) -> list[str]:
         "query": search_query,
         "per_page": count,
         "client_id": UNSPLASH_ACCESS_KEY,
+        "content_filter": "high",
     }
 
     async with aiohttp.ClientSession() as session:
@@ -93,6 +71,7 @@ async def search_images(query: str, count: int = 5) -> list[str]:
             data = await response.json()
 
     results = data.get("results", [])
+    logging.info("Unsplash returned %d results for '%s'", len(results), search_query)
     return [item["urls"]["regular"] for item in results]
 
 
@@ -139,7 +118,6 @@ async def handle_text(message: types.Message):
     await bot.send_media_group(chat_id=message.chat.id, media=media)
 
 
-# ==== Заглушечный веб-сервер, только чтобы Render видел "живой" порт ====
 async def health_check(request):
     return web.Response(text="Bot is running")
 
