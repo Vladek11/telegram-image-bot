@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InputMediaPhoto
 from aiohttp import web
-from deep_translator import GoogleTranslator, MyMemoryTranslator
+from deep_translator import GoogleTranslator
 
 # ==== НАСТРОЙКИ ====
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -28,7 +28,30 @@ dp = Dispatcher()
 _translation_cache: dict[str, str] = {}
 
 
-def translate_to_english(query: str) -> str:
+async def translate_via_mymemory(query: str) -> str | None:
+    """Прямой запрос к MyMemory API. Параметр de= — email,
+    бесплатно поднимает дневной лимит с 5000 до 50000 символов."""
+    url = "https://api.mymemory.translated.net/get"
+    params = {
+        "q": query,
+        "langpair": "ru|en",
+        "de": "imagesearchbot@example.com",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=8)
+            ) as response:
+                data = await response.json()
+                translated = data.get("responseData", {}).get("translatedText")
+                if translated and "MYMEMORY WARNING" not in translated.upper():
+                    return translated
+    except Exception as e:
+        logging.warning("MyMemory request failed: %s", e)
+    return None
+
+
+async def translate_to_english(query: str) -> str:
     cache_key = query.lower().strip()
     if cache_key in _translation_cache:
         return _translation_cache[cache_key]
@@ -41,10 +64,7 @@ def translate_to_english(query: str) -> str:
         logging.warning("Google Translate failed, trying MyMemory: %s", e)
 
     if not translated:
-        try:
-            translated = MyMemoryTranslator(source="ru-RU", target="en-GB").translate(query)
-        except Exception as e:
-            logging.warning("MyMemory Translate failed too, using original query: %s", e)
+        translated = await translate_via_mymemory(query)
 
     result = translated or query
     _translation_cache[cache_key] = result
@@ -53,7 +73,7 @@ def translate_to_english(query: str) -> str:
 
 
 async def search_images(query: str, count: int = 5) -> list[str]:
-    search_query = translate_to_english(query)
+    search_query = await translate_to_english(query)
 
     url = "https://api.unsplash.com/search/photos"
     params = {
@@ -71,7 +91,6 @@ async def search_images(query: str, count: int = 5) -> list[str]:
             data = await response.json()
 
     results = data.get("results", [])
-    logging.info("Unsplash returned %d results for '%s'", len(results), search_query)
     return [item["urls"]["regular"] for item in results]
 
 
